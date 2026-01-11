@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Bato Manga Downloader - WEB VERSION v2.1
+Bato Manga Downloader - WEB VERSION v2.2
 Features:
-- Bulk Download (Multiple URLs!)
-- Stitching Modes (Skip/Short/Normal/Tall/Custom)
-- Lossless Quality (300 DPI, no compression)
-- Download 1 by 1 with progress tracking
+- Smart Chapter Selector (paste title URL!)
+- Auto-fetch all chapters
+- Select which chapters to download
+- Bulk Download with checkboxes
+- Stitching Modes + Lossless Quality
 """
 
 import streamlit as st
@@ -23,7 +24,7 @@ import zipfile
 
 # ============ CONFIGURATION ============
 st.set_page_config(
-    page_title="Bato Manga Downloader v2.1",
+    page_title="Bato Manga Downloader v2.2",
     page_icon="📚",
     layout="wide"
 )
@@ -41,11 +42,11 @@ BATO_DOMAINS = [
 ]
 
 STITCH_PRESETS = {
-    'skip': {'height': 0, 'name': '🚀 Skip', 'desc': '1 image = 1 page. Fastest! Best for 100+ images.'},
-    'short': {'height': 5000, 'name': '⚡ Short', 'desc': '5000px chunks. Fast. Good for 50-100 images.'},
-    'normal': {'height': 15000, 'name': '📄 Normal', 'desc': '15000px chunks. Standard. Good for <50 images.'},
-    'tall': {'height': 30000, 'name': '📏 Tall', 'desc': '30000px chunks. Large chunks, fewer pages.'},
-    'custom': {'height': None, 'name': '⚙️ Custom', 'desc': 'Set your own chunk height!'}
+    'skip': {'height': 0, 'name': '🚀 Skip', 'desc': '1 image = 1 page. Fastest!'},
+    'short': {'height': 5000, 'name': '⚡ Short', 'desc': '5000px chunks. Fast.'},
+    'normal': {'height': 15000, 'name': '📄 Normal', 'desc': '15000px chunks. Standard.'},
+    'tall': {'height': 30000, 'name': '📏 Tall', 'desc': '30000px chunks. Large.'},
+    'custom': {'height': None, 'name': '⚙️ Custom', 'desc': 'Set your own!'}
 }
 
 # ============ HELPER FUNCTIONS ============
@@ -65,6 +66,90 @@ def rewrite_image_url(url):
     if re.match(r'^(https://k).*\.(png|jpg|jpeg|webp)(\?.*)?$', url, re.I):
         return url.replace("https://k", "https://n", 1)
     return url
+
+def get_title_chapters(title_url):
+    """Scrape all chapters from title page"""
+    for test_domain in ["bato.si", "bato.ing"] + BATO_DOMAINS:
+        current_url = title_url
+        for d in BATO_DOMAINS:
+            if d in current_url:
+                current_url = current_url.replace(d, test_domain)
+                break
+        
+        try:
+            response = requests.get(current_url, headers=HEADERS, timeout=15)
+            if response.status_code != 200:
+                continue
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Get manga title
+            title_elem = soup.find('h3', class_='item-title')
+            if not title_elem:
+                title_elem = soup.find('h1')
+            manga_title = title_elem.get_text(strip=True) if title_elem else "Manga"
+            
+            # Find chapter list
+            chapters = []
+            
+            # Try multiple selectors
+            chapter_links = soup.select('a[href*="/chapter/"]')
+            
+            if not chapter_links:
+                chapter_links = soup.find_all('a', href=re.compile(r'/chapter/\d+'))
+            
+            seen_urls = set()
+            
+            for link in chapter_links:
+                href = link.get('href', '')
+                if not href or '/chapter/' not in href:
+                    continue
+                
+                # Make absolute URL
+                if href.startswith('/'):
+                    chapter_url = f"https://{test_domain}{href}"
+                elif not href.startswith('http'):
+                    chapter_url = f"https://{test_domain}/{href}"
+                else:
+                    chapter_url = href
+                
+                # Avoid duplicates
+                if chapter_url in seen_urls:
+                    continue
+                seen_urls.add(chapter_url)
+                
+                # Get chapter title
+                chapter_text = link.get_text(strip=True)
+                
+                # Try to get chapter number
+                chapter_num_match = re.search(r'(?:Chapter|Ch\.?)\s*(\d+(?:\.\d+)?)', chapter_text, re.I)
+                if chapter_num_match:
+                    chapter_num = float(chapter_num_match.group(1))
+                else:
+                    # Try to extract number from URL
+                    url_num_match = re.search(r'/chapter/(\d+)', chapter_url)
+                    chapter_num = float(url_num_match.group(1)) if url_num_match else 0
+                
+                chapters.append({
+                    'title': chapter_text,
+                    'url': chapter_url,
+                    'number': chapter_num
+                })
+            
+            if chapters:
+                # Sort by chapter number (descending - newest first)
+                chapters.sort(key=lambda x: x['number'], reverse=True)
+                
+                return {
+                    'manga_title': manga_title,
+                    'chapters': chapters,
+                    'domain': test_domain
+                }
+        
+        except Exception as e:
+            continue
+    
+    return None
 
 def extract_images_multi_strategy(soup, page_html):
     image_urls = []
@@ -163,7 +248,7 @@ def images_to_pdf_lossless(image_folder, output_pdf_path, chunk_height=0, progre
     # SKIP MODE
     if chunk_height == 0:
         if progress_bar:
-            progress_bar.progress(10, text=f"🚀 Skip mode: {total_images} images...")
+            progress_bar.progress(10, text=f"Processing {total_images} images...")
         
         batch_size = 50
         all_pdf_images = []
@@ -208,7 +293,7 @@ def images_to_pdf_lossless(image_folder, output_pdf_path, chunk_height=0, progre
         except:
             return False
     
-    # STITCHING MODE
+    # STITCHING MODE (simplified for brevity - same as v2.1)
     else:
         if progress_bar:
             progress_bar.progress(10, text="Loading images...")
@@ -324,12 +409,16 @@ def main():
         st.session_state.custom_height = 10000
     if 'download_mode' not in st.session_state:
         st.session_state.download_mode = 'single'
+    if 'fetched_chapters' not in st.session_state:
+        st.session_state.fetched_chapters = None
+    if 'selected_chapters' not in st.session_state:
+        st.session_state.selected_chapters = []
     
     # Header
     col1, col2 = st.columns([4, 1])
     with col1:
         st.title("📚 Bato Manga Downloader")
-        st.markdown("### v2.1 - Bulk Download + Stitching + Lossless")
+        st.markdown("### v2.2 - Smart Chapter Selector 🎯")
     with col2:
         st.markdown("<br>", unsafe_allow_html=True)
         st.success("✨ LOSSLESS")
@@ -347,14 +436,20 @@ def main():
         st.subheader("📦 Download Mode")
         download_mode = st.radio(
             "Select mode:",
-            options=['single', 'bulk'],
-            format_func=lambda x: '📄 Single URL' if x == 'single' else '📦 Bulk Download',
+            options=['single', 'smart', 'bulk'],
+            format_func=lambda x: {
+                'single': '📄 Single Chapter',
+                'smart': '🎯 Smart Selector (NEW!)',
+                'bulk': '📦 Bulk URLs'
+            }[x],
             key='download_mode_selector'
         )
         st.session_state.download_mode = download_mode
         
-        if download_mode == 'bulk':
-            st.info("💡 Paste multiple URLs (1 per line). Download 1 by 1 sequentially.")
+        if download_mode == 'smart':
+            st.info("💡 Paste title/manga URL, select chapters with checkboxes!")
+        elif download_mode == 'bulk':
+            st.info("💡 Paste multiple chapter URLs (1 per line)")
         
         st.divider()
         
@@ -382,7 +477,6 @@ def main():
             )
             st.session_state.custom_height = custom_height
             chunk_height = custom_height
-            st.caption(f"📏 {chunk_height:,}px")
         else:
             chunk_height = STITCH_PRESETS[selected_mode]['height']
         
@@ -399,30 +493,32 @@ def main():
         st.divider()
         
         # Info
-        with st.expander("ℹ️ Info"):
+        with st.expander("ℹ️ Features"):
             st.write("""
-            **v2.1 Features:**
-            - ✅ Bulk download (NEW!)
+            **v2.2 NEW:**
+            - ✅ Smart chapter selector!
+            - ✅ Auto-fetch chapters
+            - ✅ Checkbox selection
+            
+            **Previous:**
+            - ✅ Bulk download
             - ✅ Custom stitching
             - ✅ Lossless quality
-            - ✅ 300 DPI output
-            - ✅ ZIP packaging
             """)
         
-        with st.expander("📖 Bulk Guide"):
+        with st.expander("📖 Smart Selector"):
             st.markdown("""
             **How to use:**
-            1. Select "Bulk Download"
-            2. Paste URLs (1 per line)
-            3. Click "Download All"
-            4. Wait for processing
-            5. Get ZIP file!
+            1. Paste title/manga URL
+            2. Click "Fetch Chapters"
+            3. Select chapters (checkboxes)
+            4. Click "Download Selected"
+            5. Get ZIP!
             
-            **Features:**
-            - Download 1 by 1
-            - Progress tracking
-            - Auto ZIP packaging
-            - Failed URLs skipped
+            **Example URL:**
+            ```
+            https://bato.ing/title/12345-manga-name
+            ```
             """)
         
         st.divider()
@@ -432,52 +528,13 @@ def main():
     # Main area
     st.markdown("---")
     
-    # Download mode UI
+    # Render based on mode
     if st.session_state.download_mode == 'single':
-        # SINGLE MODE
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            chapter_url = st.text_input(
-                "📎 Paste Bato Chapter URL:",
-                placeholder="https://bato.ing/chapter/123456"
-            )
-        
-        with col2:
-            st.write("")
-            st.write("")
-            download_button = st.button("⬇️ Download", type="primary", use_container_width=True)
-        
-        # Process single download
-        if download_button and chapter_url:
-            process_single_download(chapter_url, chunk_height)
-    
-    else:
-        # BULK MODE
-        st.subheader("📦 Bulk Download Mode")
-        
-        urls_text = st.text_area(
-            "📎 Paste Chapter URLs (1 per line):",
-            placeholder="https://bato.ing/chapter/123456\nhttps://bato.ing/chapter/123457\nhttps://bato.ing/chapter/123458",
-            height=200
-        )
-        
-        col1, col2, col3 = st.columns([1, 1, 1])
-        
-        with col2:
-            download_all_button = st.button("📦 Download All", type="primary", use_container_width=True)
-        
-        # Process bulk download
-        if download_all_button and urls_text:
-            urls = parse_urls(urls_text)
-            
-            if not urls:
-                st.error("❌ No valid Bato URLs found!")
-                return
-            
-            st.success(f"✅ Found {len(urls)} URLs to download")
-            
-            process_bulk_download(urls, chunk_height)
+        render_single_mode(chunk_height)
+    elif st.session_state.download_mode == 'smart':
+        render_smart_mode(chunk_height)
+    else:  # bulk
+        render_bulk_mode(chunk_height)
     
     # Mode banner
     if chunk_height == 0:
@@ -487,22 +544,165 @@ def main():
     else:
         st.warning(f"📏 {chunk_height:,}px chunks | Lossless 300 DPI")
     
-    # Examples
-    with st.expander("📝 Example URLs"):
-        if st.session_state.download_mode == 'single':
-            st.code("https://bato.si/chapter/123456")
-        else:
-            st.code("""https://bato.si/chapter/123456
-https://bato.si/chapter/123457
-https://bato.si/chapter/123458""")
-    
     # Footer
     st.write("---")
     st.markdown("""
     <div style='text-align: center; color: gray;'>
-    <p>v2.1 - Bulk Download • Lossless Quality • @moonread_channel</p>
+    <p>v2.2 - Smart Selector • Lossless Quality • @moonread_channel</p>
     </div>
     """, unsafe_allow_html=True)
+
+def render_single_mode(chunk_height):
+    """Render single chapter download UI"""
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        chapter_url = st.text_input(
+            "📎 Paste Chapter URL:",
+            placeholder="https://bato.ing/chapter/123456"
+        )
+    
+    with col2:
+        st.write("")
+        st.write("")
+        download_button = st.button("⬇️ Download", type="primary", use_container_width=True)
+    
+    if download_button and chapter_url:
+        process_single_download(chapter_url, chunk_height)
+
+def render_smart_mode(chunk_height):
+    """Render smart chapter selector UI"""
+    st.subheader("🎯 Smart Chapter Selector")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        title_url = st.text_input(
+            "📎 Paste Title/Manga URL:",
+            placeholder="https://bato.ing/title/12345-manga-name",
+            help="Paste the main manga/title page URL"
+        )
+    
+    with col2:
+        st.write("")
+        st.write("")
+        fetch_button = st.button("🔍 Fetch Chapters", type="primary", use_container_width=True)
+    
+    # Example
+    with st.expander("📝 Example URL"):
+        st.code("https://bato.ing/title/200786-grand-duchess-s-constitution-rokari-comics")
+        st.caption("Paste the main title page, not individual chapter URLs!")
+    
+    # Fetch chapters
+    if fetch_button and title_url:
+        is_title_url = any(f'/title/' in title_url for domain in BATO_DOMAINS if domain in title_url)
+        
+        if not is_title_url:
+            st.error("❌ This doesn't look like a title URL! Make sure it contains '/title/'")
+            return
+        
+        with st.spinner("🔍 Fetching chapters from title page..."):
+            title_data = get_title_chapters(title_url)
+        
+        if not title_data:
+            st.error("❌ Failed to fetch chapters! Check if URL is valid.")
+            return
+        
+        st.session_state.fetched_chapters = title_data
+        st.session_state.selected_chapters = []
+        st.success(f"✅ Found {len(title_data['chapters'])} chapters!")
+        st.rerun()
+    
+    # Display chapters if fetched
+    if st.session_state.fetched_chapters:
+        title_data = st.session_state.fetched_chapters
+        
+        st.write("---")
+        st.subheader(f"📚 {title_data['manga_title']}")
+        st.caption(f"Found {len(title_data['chapters'])} chapters")
+        
+        # Select all / Deselect all
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("✅ Select All", use_container_width=True):
+                st.session_state.selected_chapters = [ch['url'] for ch in title_data['chapters']]
+                st.rerun()
+        with col2:
+            if st.button("❌ Deselect All", use_container_width=True):
+                st.session_state.selected_chapters = []
+                st.rerun()
+        
+        st.write("")
+        
+        # Chapter checkboxes
+        st.markdown("**Select Chapters:**")
+        
+        # Group in columns for better layout
+        chapters_per_col = 10
+        num_cols = 3
+        cols = st.columns(num_cols)
+        
+        for idx, chapter in enumerate(title_data['chapters']):
+            col_idx = (idx // chapters_per_col) % num_cols
+            
+            with cols[col_idx]:
+                is_selected = chapter['url'] in st.session_state.selected_chapters
+                checkbox = st.checkbox(
+                    chapter['title'],
+                    value=is_selected,
+                    key=f"ch_{idx}"
+                )
+                
+                if checkbox and not is_selected:
+                    st.session_state.selected_chapters.append(chapter['url'])
+                elif not checkbox and is_selected:
+                    st.session_state.selected_chapters.remove(chapter['url'])
+        
+        # Download selected
+        st.write("---")
+        
+        selected_count = len(st.session_state.selected_chapters)
+        
+        if selected_count > 0:
+            st.success(f"✅ Selected: {selected_count} chapters")
+            
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col2:
+                download_selected = st.button(
+                    f"📦 Download Selected ({selected_count})",
+                    type="primary",
+                    use_container_width=True
+                )
+            
+            if download_selected:
+                process_bulk_download(st.session_state.selected_chapters, chunk_height)
+        else:
+            st.warning("⚠️ No chapters selected!")
+
+def render_bulk_mode(chunk_height):
+    """Render bulk download UI"""
+    st.subheader("📦 Bulk Download Mode")
+    
+    urls_text = st.text_area(
+        "📎 Paste Chapter URLs (1 per line):",
+        placeholder="https://bato.ing/chapter/123456\nhttps://bato.ing/chapter/123457\nhttps://bato.ing/chapter/123458",
+        height=200
+    )
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col2:
+        download_all_button = st.button("📦 Download All", type="primary", use_container_width=True)
+    
+    if download_all_button and urls_text:
+        urls = parse_urls(urls_text)
+        
+        if not urls:
+            st.error("❌ No valid Bato URLs found!")
+            return
+        
+        st.success(f"✅ Found {len(urls)} URLs to download")
+        process_bulk_download(urls, chunk_height)
 
 def process_single_download(chapter_url, chunk_height):
     """Process single chapter download"""
@@ -526,9 +726,6 @@ def process_single_download(chapter_url, chunk_height):
         chapter_title = sanitize_filename(chapter_info['title'])
         
         st.success(f"✅ {chapter_info['title']} ({total_images} images)")
-        
-        if total_images >= 100 and chunk_height > 0:
-            st.warning(f"💡 {total_images} images! Consider Skip mode.")
         
         st.write("---")
         st.subheader("📥 Downloading")
@@ -597,8 +794,6 @@ def process_single_download(chapter_url, chunk_height):
         
         st.session_state.downloads += 1
         
-        st.info(f"**Chapter:** {chapter_info['title']} | **Size:** {file_size_mb:.1f}MB | **Time:** {total_time:.1f}s")
-        
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
     finally:
@@ -608,7 +803,7 @@ def process_single_download(chapter_url, chunk_height):
             pass
 
 def process_bulk_download(urls, chunk_height):
-    """Process bulk download - download 1 by 1"""
+    """Process bulk download"""
     temp_dir = tempfile.mkdtemp()
     pdf_files = []
     
@@ -616,7 +811,6 @@ def process_bulk_download(urls, chunk_height):
         st.write("---")
         st.subheader(f"📦 Processing {len(urls)} Chapters")
         
-        # Overall progress
         overall_progress = st.progress(0)
         overall_status = st.empty()
         
@@ -625,17 +819,15 @@ def process_bulk_download(urls, chunk_height):
         for idx, url in enumerate(urls, 1):
             overall_status.write(f"**Processing Chapter {idx}/{len(urls)}**")
             
-            # Chapter section
             with st.expander(f"📄 Chapter {idx}/{len(urls)}", expanded=True):
-                st.write(f"URL: `{url[:50]}...`")
+                st.write(f"URL: `{url[:60]}...`")
                 
                 try:
-                    # Fetch chapter
                     with st.spinner("Fetching..."):
                         chapter_info = get_chapter_info(url)
                     
                     if not chapter_info:
-                        st.error(f"❌ Failed to fetch chapter {idx}")
+                        st.error(f"❌ Failed")
                         continue
                     
                     total_images = len(chapter_info['images'])
@@ -643,7 +835,6 @@ def process_bulk_download(urls, chunk_height):
                     
                     st.success(f"✅ {chapter_info['title']} ({total_images} images)")
                     
-                    # Download images
                     download_progress = st.progress(0)
                     download_status = st.empty()
                     
@@ -668,10 +859,9 @@ def process_bulk_download(urls, chunk_height):
                                     download_status.write(f"Downloaded: {downloaded}/{total_images}")
                     
                     if downloaded == 0:
-                        st.error(f"❌ No images downloaded for chapter {idx}")
+                        st.error(f"❌ No images")
                         continue
                     
-                    # Create PDF
                     pdf_progress = st.progress(0)
                     pdf_path = os.path.join(temp_dir, f"{chapter_title}.pdf")
                     
@@ -682,22 +872,20 @@ def process_bulk_download(urls, chunk_height):
                         st.success(f"✅ PDF created ({file_size_mb:.1f}MB)")
                         pdf_files.append((pdf_path, chapter_title))
                     else:
-                        st.error(f"❌ PDF creation failed for chapter {idx}")
+                        st.error(f"❌ PDF failed")
                     
                 except Exception as e:
-                    st.error(f"❌ Error on chapter {idx}: {str(e)}")
+                    st.error(f"❌ Error: {str(e)}")
                     continue
             
-            # Update overall progress
             overall_progress.progress(idx / len(urls))
         
-        # Create ZIP if we have PDFs
         if pdf_files:
             st.write("---")
             st.subheader("📦 Packaging")
             
-            with st.spinner("Creating ZIP file..."):
-                zip_path = os.path.join(temp_dir, "Bato_Bulk_Download.zip")
+            with st.spinner("Creating ZIP..."):
+                zip_path = os.path.join(temp_dir, "Bato_Download.zip")
                 
                 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                     for pdf_path, title in pdf_files:
@@ -706,7 +894,7 @@ def process_bulk_download(urls, chunk_height):
             zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
             total_time = time.time() - start_time
             
-            st.success(f"✅ Created ZIP with {len(pdf_files)} PDFs ({zip_size_mb:.1f}MB in {total_time:.1f}s)")
+            st.success(f"✅ ZIP with {len(pdf_files)} PDFs ({zip_size_mb:.1f}MB in {total_time:.1f}s)")
             
             st.write("---")
             
@@ -718,24 +906,17 @@ def process_bulk_download(urls, chunk_height):
                 st.download_button(
                     label=f"📦 Download ZIP ({len(pdf_files)} PDFs, {zip_size_mb:.1f}MB)",
                     data=zip_data,
-                    file_name="Bato_Bulk_Download.zip",
+                    file_name="Bato_Download.zip",
                     mime="application/zip",
                     use_container_width=True
                 )
             
             st.session_state.downloads += len(pdf_files)
-            
-            st.info(f"""
-            **Summary:**
-            - Successfully downloaded: {len(pdf_files)}/{len(urls)} chapters
-            - Total size: {zip_size_mb:.1f}MB
-            - Total time: {total_time:.1f}s
-            """)
         else:
-            st.error("❌ No PDFs were created successfully!")
+            st.error("❌ No PDFs created!")
         
     except Exception as e:
-        st.error(f"❌ Bulk download error: {str(e)}")
+        st.error(f"❌ Error: {str(e)}")
     finally:
         try:
             shutil.rmtree(temp_dir)
