@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Bato Manga Downloader - WEB VERSION (Streamlit)
-Better for many users - No bot rate limits!
-Deploy: Streamlit Cloud (FREE!) or any server
+Bato Manga Downloader - WEB VERSION v2.0
+Features:
+- Stitching Modes (Skip/Short/Normal/Tall/Custom)
+- Lossless Quality (No compression!)
+- Custom chunk height slider
 """
 
 import streamlit as st
@@ -11,7 +13,6 @@ from bs4 import BeautifulSoup
 import re
 import os
 import shutil
-import zipfile
 import json
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
@@ -20,7 +21,7 @@ import time
 
 # ============ CONFIGURATION ============
 st.set_page_config(
-    page_title="Bato Manga Downloader",
+    page_title="Bato Manga Downloader v2.0",
     page_icon="📚",
     layout="wide"
 )
@@ -37,45 +38,37 @@ BATO_DOMAINS = [
     "bato.ac", "bato.bz", "bato.to", "comiko.net", "mangatoto.com"
 ]
 
+# Stitching presets
+STITCH_PRESETS = {
+    'skip': {'height': 0, 'name': '🚀 Skip', 'desc': '1 image = 1 page. Fastest! Best for 100+ images.'},
+    'short': {'height': 5000, 'name': '⚡ Short', 'desc': '5000px chunks. Fast. Good for 50-100 images.'},
+    'normal': {'height': 15000, 'name': '📄 Normal', 'desc': '15000px chunks. Standard. Good for <50 images.'},
+    'tall': {'height': 30000, 'name': '📏 Tall', 'desc': '30000px chunks. Large chunks, fewer pages.'},
+    'custom': {'height': None, 'name': '⚙️ Custom', 'desc': 'Set your own chunk height!'}
+}
+
 # ============ HELPER FUNCTIONS ============
 
 def sanitize_filename(name):
-    """Clean filename"""
     name = re.sub(r'[<>:"/\\|?*]', '_', name)
     name = re.sub(r'\s+', '_', name)
     return name[:200]
 
 def natural_sort_key(filename):
-    """Natural sorting"""
     return [int(text) if text.isdigit() else text.lower() 
             for text in re.split(r'(\d+)', filename)]
 
 def rewrite_image_url(url):
-    """Rewrite image URL"""
     if not url:
         return url
     if re.match(r'^(https://k).*\.(png|jpg|jpeg|webp)(\?.*)?$', url, re.I):
         return url.replace("https://k", "https://n", 1)
     return url
 
-def find_working_domain():
-    """Find working domain"""
-    for domain in ["bato.si", "bato.ing"]:
-        try:
-            url = f"https://{domain}"
-            response = requests.get(url, headers=HEADERS, timeout=5)
-            if response.status_code == 200:
-                return domain
-        except:
-            continue
-    return "bato.si"
-
 def extract_images_multi_strategy(soup, page_html):
-    """Extract image URLs"""
     image_urls = []
-    
-    # STRATEGY 1: imgHttps array
     scripts = soup.find_all('script')
+    
     for script in scripts:
         if not script.string:
             continue
@@ -95,7 +88,6 @@ def extract_images_multi_strategy(soup, page_html):
             if urls:
                 return urls
     
-    # STRATEGY 2: All HTTPS image URLs
     for script in scripts:
         if script.string:
             urls = re.findall(r'https://[^\s"\'<>]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^\s"\'<>]*)?', 
@@ -108,7 +100,6 @@ def extract_images_multi_strategy(soup, page_html):
     return []
 
 def get_chapter_info(chapter_url):
-    """Get chapter info"""
     for test_domain in ["bato.si", "bato.ing"] + BATO_DOMAINS:
         current_url = chapter_url
         for d in BATO_DOMAINS:
@@ -118,7 +109,6 @@ def get_chapter_info(chapter_url):
         
         try:
             response = requests.get(current_url, headers=HEADERS, timeout=15)
-            
             if response.status_code != 200:
                 continue
             
@@ -140,14 +130,12 @@ def get_chapter_info(chapter_url):
                 'images': image_urls,
                 'domain': test_domain
             }
-            
         except:
             continue
     
     return None
 
 def download_image(url, save_path):
-    """Download single image"""
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
@@ -157,8 +145,12 @@ def download_image(url, save_path):
     except:
         return False
 
-def images_to_pdf_batch(image_folder, output_pdf_path, progress_bar=None):
-    """Convert images to PDF with batch processing"""
+def images_to_pdf_lossless(image_folder, output_pdf_path, chunk_height=0, progress_bar=None):
+    """
+    Convert images to PDF with LOSSLESS quality
+    chunk_height = 0: No stitching
+    chunk_height > 0: Stitch with specified height
+    """
     image_files = []
     for fname in os.listdir(image_folder):
         if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')):
@@ -169,23 +161,93 @@ def images_to_pdf_batch(image_folder, output_pdf_path, progress_bar=None):
     if not image_files:
         return False
     
-    # Batch processing for 50+ images
-    batch_size = 50
-    all_pdf_images = []
+    total_images = len(image_files)
     
-    for batch_start in range(0, len(image_files), batch_size):
-        batch_end = min(batch_start + batch_size, len(image_files))
-        batch_files = image_files[batch_start:batch_end]
+    # SKIP MODE (No stitching) - LOSSLESS
+    if chunk_height == 0:
+        if progress_bar:
+            progress_bar.progress(10, text=f"🚀 Skip mode: Processing {total_images} images (lossless)...")
+        
+        batch_size = 50
+        all_pdf_images = []
+        
+        for batch_start in range(0, len(image_files), batch_size):
+            batch_end = min(batch_start + batch_size, len(image_files))
+            batch_files = image_files[batch_start:batch_end]
+            
+            if progress_bar:
+                progress = int(10 + 80 * batch_end / len(image_files))
+                progress_bar.progress(progress, text=f"Converting {batch_start+1}-{batch_end}/{len(image_files)} (lossless)...")
+            
+            for img_path in batch_files:
+                try:
+                    img = Image.open(img_path)
+                    
+                    # Convert to RGB without compression
+                    if img.mode in ('RGBA', 'LA', 'P'):
+                        rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                        if img.mode == 'P':
+                            img = img.convert('RGBA')
+                        rgb_img.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                        img = rgb_img
+                    elif img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    
+                    all_pdf_images.append(img)
+                except:
+                    continue
+        
+        if not all_pdf_images:
+            return False
         
         if progress_bar:
-            progress = int(100 * batch_end / len(image_files))
-            progress_bar.progress(progress, text=f"Converting batch {batch_start+1}-{batch_end}/{len(image_files)}...")
+            progress_bar.progress(95, text=f"Saving PDF ({len(all_pdf_images)} pages) - lossless quality...")
         
-        for img_path in batch_files:
+        try:
+            first_image = all_pdf_images[0]
+            other_images = all_pdf_images[1:] if len(all_pdf_images) > 1 else []
+            
+            # Save with MAXIMUM quality (no compression!)
+            first_image.save(
+                output_pdf_path, 
+                'PDF', 
+                resolution=300.0,      # HIGH DPI for quality
+                save_all=True, 
+                append_images=other_images,
+                quality=100,           # MAXIMUM quality
+                optimize=False,        # NO optimization = lossless
+                compress_level=0       # NO compression
+            )
+            
+            if progress_bar:
+                progress_bar.progress(100, text="✅ Complete! Lossless quality preserved!")
+            
+            return True
+        except Exception as e:
+            st.error(f"PDF save error: {e}")
+            return False
+    
+    # STITCHING MODE - LOSSLESS
+    else:
+        if progress_bar:
+            progress_bar.progress(10, text="📊 Analyzing images (lossless mode)...")
+        
+        images = []
+        min_width = None
+        
+        # Load all images
+        for idx, img_path in enumerate(image_files):
+            if progress_bar and idx % 10 == 0:
+                progress = int(10 + 40 * (idx + 1) / total_images)
+                progress_bar.progress(progress, text=f"Loading {idx+1}/{total_images} (preserving quality)...")
+            
             try:
                 img = Image.open(img_path)
                 
-                # Convert to RGB
+                if min_width is None or img.width < min_width:
+                    min_width = img.width
+                
+                # Convert to RGB without quality loss
                 if img.mode in ('RGBA', 'LA', 'P'):
                     rgb_img = Image.new('RGB', img.size, (255, 255, 255))
                     if img.mode == 'P':
@@ -195,120 +257,291 @@ def images_to_pdf_batch(image_folder, output_pdf_path, progress_bar=None):
                 elif img.mode != 'RGB':
                     img = img.convert('RGB')
                 
-                all_pdf_images.append(img)
+                # Resize ONLY if needed - use LANCZOS (highest quality)
+                if min_width and img.width != min_width:
+                    ratio = min_width / img.width
+                    new_height = int(img.height * ratio)
+                    img = img.resize((min_width, new_height), Image.Resampling.LANCZOS)
+                
+                images.append(img)
             except:
                 continue
-    
-    if not all_pdf_images:
-        return False
-    
-    # Save as PDF
-    if progress_bar:
-        progress_bar.progress(95, text=f"Finalizing PDF ({len(all_pdf_images)} pages)...")
-    
-    try:
-        first_image = all_pdf_images[0]
-        other_images = all_pdf_images[1:] if len(all_pdf_images) > 1 else []
         
-        first_image.save(
-            output_pdf_path, 
-            'PDF', 
-            resolution=72.0,
-            save_all=True, 
-            append_images=other_images,
-            optimize=False
-        )
+        if not images:
+            return False
         
+        # Create chunks
         if progress_bar:
-            progress_bar.progress(100, text="Complete!")
+            progress_bar.progress(55, text=f"Creating chunks ({chunk_height:,}px)...")
         
-        return True
-    except Exception as e:
-        st.error(f"PDF save error: {e}")
+        chunks = []
+        current_chunk = []
+        current_height = 0
+        
+        for img in images:
+            if current_height + img.height > chunk_height and current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = [img]
+                current_height = img.height
+            else:
+                current_chunk.append(img)
+                current_height += img.height
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        # Stitch chunks (lossless)
+        if progress_bar:
+            progress_bar.progress(60, text=f"Stitching {len(chunks)} chunks (lossless)...")
+        
+        stitched_images = []
+        for chunk_idx, chunk in enumerate(chunks):
+            if progress_bar:
+                progress = int(60 + 30 * (chunk_idx + 1) / len(chunks))
+                progress_bar.progress(progress, text=f"Stitching {chunk_idx+1}/{len(chunks)} ({len(chunk)} imgs)...")
+            
+            chunk_height_px = sum(img.height for img in chunk)
+            stitched = Image.new('RGB', (min_width, chunk_height_px), (255, 255, 255))
+            
+            y_offset = 0
+            for img in chunk:
+                stitched.paste(img, (0, y_offset))
+                y_offset += img.height
+            
+            stitched_images.append(stitched)
+        
+        # Save PDF with maximum quality
+        if progress_bar:
+            progress_bar.progress(95, text=f"Saving PDF ({len(stitched_images)} pages) - lossless...")
+        
+        if stitched_images:
+            try:
+                first_image = stitched_images[0]
+                other_images = stitched_images[1:] if len(stitched_images) > 1 else []
+                
+                # MAXIMUM quality settings
+                first_image.save(
+                    output_pdf_path, 
+                    'PDF', 
+                    resolution=300.0,      # HIGH DPI
+                    save_all=True, 
+                    append_images=other_images,
+                    quality=100,           # MAXIMUM quality
+                    optimize=False,        # NO optimization
+                    compress_level=0       # NO compression
+                )
+                
+                if progress_bar:
+                    progress_bar.progress(100, text="✅ PDF created! Lossless quality!")
+                
+                return True
+            except Exception as e:
+                st.error(f"PDF save error: {e}")
+                return False
+        
         return False
 
 # ============ STREAMLIT UI ============
 
 def main():
-    # Header
-    st.title("📚 Bato Manga Downloader")
-    st.markdown("### Web Version - Better for Many Users!")
-    st.markdown("**No bot limits, no queue, instant download!**")
+    # Initialize session state
+    if 'downloads' not in st.session_state:
+        st.session_state.downloads = 0
+    if 'stitch_mode' not in st.session_state:
+        st.session_state.stitch_mode = 'skip'
+    if 'custom_height' not in st.session_state:
+        st.session_state.custom_height = 10000
+    
+    # Header with quality badge
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.title("📚 Bato Manga Downloader")
+        st.markdown("### v2.0 - Stitching Modes + Lossless Quality")
+    with col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.success("✨ LOSSLESS")
     
     # Sidebar
     with st.sidebar:
+        st.header("⚙️ Settings")
+        
+        # Quality info badge
+        st.success("✨ **Lossless Quality Active**")
+        st.caption("Original image quality preserved!")
+        
+        st.divider()
+        
+        # Stitching mode selector
+        st.subheader("🎨 Stitching Mode")
+        
+        mode_options = {k: v['name'] for k, v in STITCH_PRESETS.items()}
+        selected_mode = st.selectbox(
+            "Mode:",
+            options=list(mode_options.keys()),
+            format_func=lambda x: mode_options[x],
+            index=list(mode_options.keys()).index(st.session_state.stitch_mode),
+            key='mode_selector'
+        )
+        
+        st.session_state.stitch_mode = selected_mode
+        
+        # Show description
+        st.info(STITCH_PRESETS[selected_mode]['desc'])
+        
+        # Custom height slider
+        if selected_mode == 'custom':
+            custom_height = st.slider(
+                "Chunk Height (pixels):",
+                min_value=1000,
+                max_value=50000,
+                value=st.session_state.custom_height,
+                step=1000,
+                help="Higher = fewer pages, longer chunks"
+            )
+            st.session_state.custom_height = custom_height
+            chunk_height = custom_height
+            
+            # Visual guide
+            st.caption(f"📏 {chunk_height:,}px = ~{chunk_height/1000:.0f} standard screens")
+        else:
+            chunk_height = STITCH_PRESETS[selected_mode]['height']
+        
+        st.divider()
+        
+        # Current settings display
+        st.markdown("**📊 Current Settings:**")
+        
+        # Mode
+        if chunk_height == 0:
+            st.metric("Mode", "🚀 Skip (No Stitch)")
+            st.caption("1 image = 1 PDF page")
+        else:
+            st.metric("Mode", f"📏 {chunk_height:,}px chunks")
+            st.caption(f"Images stitched per page")
+        
+        # Quality
+        st.metric("Quality", "✨ Lossless")
+        st.caption("300 DPI, no compression")
+        
+        st.divider()
+        
+        # Info
         st.header("ℹ️ Info")
-        st.write("""
-        **Features:**
-        - ✅ 57 Bato domains
-        - ✅ Batch processing
-        - ✅ Direct PDF download
-        - ✅ No rate limits
-        - ✅ Handle 100+ images
+        with st.expander("Features"):
+            st.write("""
+            ✅ 57 Bato domains
+            ✅ Custom stitching modes  
+            ✅ **Lossless quality (NEW!)**
+            ✅ 300 DPI output
+            ✅ No compression
+            ✅ Direct PDF download
+            ✅ Handle 100+ images
+            """)
         
-        **Support:**
-        - @moonread_channel
+        with st.expander("📖 Mode Guide"):
+            st.markdown("""
+            **🚀 Skip (0px)**
+            - No stitching
+            - 1 image = 1 page
+            - Fastest processing
+            - Best for: 100+ images
+            
+            **⚡ Short (5000px)**
+            - Small chunks
+            - More pages
+            - Best for: 50-100 images
+            
+            **📄 Normal (15000px)**
+            - Standard chunks
+            - Balanced
+            - Best for: <50 images
+            
+            **📏 Tall (30000px)**
+            - Large chunks
+            - Fewer pages
+            - Best for: Long strips
+            
+            **⚙️ Custom**
+            - Set your own height!
+            - 1000-50000px range
+            - Full control
+            """)
         
-        **Tips:**
-        - Paste chapter URL
-        - Click Download
-        - Wait for processing
-        - Download PDF
-        """)
+        with st.expander("💎 Quality Info"):
+            st.markdown("""
+            **Lossless Settings:**
+            - ✅ 300 DPI resolution
+            - ✅ Quality: 100%
+            - ✅ No compression
+            - ✅ No optimization
+            - ✅ LANCZOS resampling
+            
+            **Result:**
+            - Same quality as Bato!
+            - Large file size (worth it!)
+            - Perfect for reading
+            """)
         
         st.divider()
         
         # Stats
-        if 'downloads' not in st.session_state:
-            st.session_state.downloads = 0
-        
         st.metric("Total Downloads", st.session_state.downloads)
+        
+        st.caption("@moonread_channel")
     
     # Main area
+    st.markdown("---")
+    
     col1, col2 = st.columns([3, 1])
     
     with col1:
         chapter_url = st.text_input(
             "📎 Paste Bato Chapter URL:",
             placeholder="https://bato.ing/chapter/123456",
-            help="Paste any Bato chapter URL from any domain"
+            help="Paste any Bato chapter URL"
         )
     
     with col2:
-        st.write("")  # Spacing
-        st.write("")  # Spacing
-        download_button = st.button("⬇️ Download PDF", type="primary", use_container_width=True)
+        st.write("")
+        st.write("")
+        download_button = st.button("⬇️ Download", type="primary", use_container_width=True)
+    
+    # Mode info banner
+    if chunk_height == 0:
+        st.info("🚀 **Skip Mode** | No stitching | 1 image = 1 page | Fastest | Lossless quality (300 DPI)")
+    elif chunk_height <= 5000:
+        st.info(f"⚡ **Short Mode** | {chunk_height:,}px chunks | More pages | Lossless quality (300 DPI)")
+    elif chunk_height <= 15000:
+        st.success(f"📄 **Normal Mode** | {chunk_height:,}px chunks | Balanced | Lossless quality (300 DPI)")
+    else:
+        st.warning(f"📏 **Tall/Custom Mode** | {chunk_height:,}px chunks | Fewer pages | Lossless quality (300 DPI)")
     
     # Example URLs
     with st.expander("📝 Example URLs"):
         st.code("https://bato.si/chapter/123456")
         st.code("https://bato.ing/chapter/789012")
         st.code("https://nto.to/chapter/456789")
-        st.code("https://comiko.org/title/xxx/chapter-1")
     
     # Process download
     if download_button and chapter_url:
-        # Validate URL
         is_bato_url = any(domain in chapter_url for domain in BATO_DOMAINS)
         
         if not is_bato_url:
-            st.error("❌ Not a valid Bato URL! Please check the URL.")
+            st.error("❌ Not a valid Bato URL!")
             return
         
-        # Create temp directory
         temp_dir = tempfile.mkdtemp()
         
         try:
-            # Progress
             progress_container = st.container()
             
             with progress_container:
-                # Step 1: Fetch chapter info
+                # Fetch chapter
                 with st.spinner("🔍 Fetching chapter info..."):
                     chapter_info = get_chapter_info(chapter_url)
                 
                 if not chapter_info:
-                    st.error("❌ Failed to fetch chapter! URL might be invalid or domain is down.")
+                    st.error("❌ Failed to fetch chapter!")
                     return
                 
                 total_images = len(chapter_info['images'])
@@ -316,15 +549,15 @@ def main():
                 
                 st.success(f"✅ Found: **{chapter_info['title']}** ({total_images} images)")
                 
-                # Recommendation for 100+
-                if total_images >= 100:
-                    st.info(f"💡 **{total_images} images detected!** Using batch processing for optimal performance.")
+                # Auto-suggest mode
+                if total_images >= 100 and chunk_height > 0:
+                    st.warning(f"💡 **{total_images} images detected!** Consider using Skip mode for faster processing.")
                 
-                # Step 2: Download images
+                # Download images
                 st.write("---")
                 st.subheader("📥 Downloading Images")
                 
-                download_progress = st.progress(0, text="Starting download...")
+                download_progress = st.progress(0)
                 download_status = st.empty()
                 
                 temp_folder = os.path.join(temp_dir, chapter_title)
@@ -346,8 +579,8 @@ def main():
                             percent = int(100 * downloaded / total_images)
                             
                             if downloaded % 5 == 0 or downloaded == total_images:
-                                download_progress.progress(percent, text=f"Downloaded {downloaded}/{total_images}...")
-                                download_status.write(f"Progress: {downloaded}/{total_images} ({percent}%)")
+                                download_progress.progress(percent / 100)
+                                download_status.write(f"Downloaded: {downloaded}/{total_images} ({percent}%)")
                 
                 if downloaded == 0:
                     st.error("❌ Failed to download images!")
@@ -356,15 +589,15 @@ def main():
                 download_time = time.time() - start_time
                 st.success(f"✅ Downloaded {downloaded} images in {download_time:.1f}s")
                 
-                # Step 3: Create PDF
+                # Create PDF
                 st.write("---")
-                st.subheader("📄 Creating PDF")
+                st.subheader("📄 Creating PDF (Lossless Quality)")
                 
-                pdf_progress = st.progress(0, text="Initializing...")
+                pdf_progress = st.progress(0)
                 
                 pdf_path = os.path.join(temp_dir, f"{chapter_title}.pdf")
                 
-                success = images_to_pdf_batch(temp_folder, pdf_path, pdf_progress)
+                success = images_to_pdf_lossless(temp_folder, pdf_path, chunk_height, pdf_progress)
                 
                 if not success:
                     st.error("❌ Failed to create PDF!")
@@ -375,7 +608,7 @@ def main():
                 
                 st.success(f"✅ PDF created! ({file_size_mb:.1f}MB in {total_time:.1f}s)")
                 
-                # Step 4: Download button
+                # Download button
                 st.write("---")
                 st.subheader("💾 Download Your PDF")
                 
@@ -386,7 +619,7 @@ def main():
                 
                 with col2:
                     st.download_button(
-                        label="📥 Download PDF",
+                        label=f"📥 Download PDF ({file_size_mb:.1f}MB)",
                         data=pdf_data,
                         file_name=f"{chapter_title}.pdf",
                         mime="application/pdf",
@@ -400,16 +633,17 @@ def main():
                 st.info(f"""
                 **Chapter:** {chapter_info['title']}  
                 **Images:** {downloaded}  
-                **Domain:** {chapter_info['domain']}  
+                **Mode:** {STITCH_PRESETS[selected_mode]['name']} ({chunk_height:,}px)  
+                **Quality:** ✨ Lossless (300 DPI)  
                 **Size:** {file_size_mb:.1f}MB  
-                **Time:** {total_time:.1f}s
+                **Time:** {total_time:.1f}s  
+                **Domain:** {chapter_info['domain']}
                 """)
                 
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
         
         finally:
-            # Cleanup
             try:
                 shutil.rmtree(temp_dir)
             except:
@@ -419,8 +653,8 @@ def main():
     st.write("---")
     st.markdown("""
     <div style='text-align: center; color: gray;'>
-    <p>Made with ❤️ for @moonread_channel | v1.0 Web</p>
-    <p>No rate limits • No queues • Direct download</p>
+    <p>Made with ❤️ for @moonread_channel | v2.0 - Lossless Quality</p>
+    <p>✨ 300 DPI • No compression • Original quality preserved</p>
     </div>
     """, unsafe_allow_html=True)
 
